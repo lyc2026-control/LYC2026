@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f0c29">
+<title>活字矩阵</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden}
+body{
+  background:linear-gradient(160deg,#0f0c29 0%,#302b63 48%,#24243e 100%) fixed;
+}
+canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script>
+(() => {
+'use strict';
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+
+/* ---------- 颜色工具 ---------- */
+const hex = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+const C_BASE_A = hex('#2a1e3c');   // 方格基础色A：深紫灰
+const C_BASE_B = hex('#1a1a2e');   // 方格基础色B：深蓝灰
+const C_VIOLET = hex('#a78bfa');   // 凸起高光：亮紫
+const C_CYAN   = hex('#00d4ff');   // 凸起高光：亮青
+const C_SHADOW = '#0a0818';        // 方格阴影：深紫黑
+const lerp3 = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const rgba  = (c,a=1) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+
+/* ---------- 状态 ---------- */
+let W=0, H=0, dpr=1;
+let cell=24, gap=2, maxLift=7;
+let cols=0, rows=0;
+let lifts=null, bases=null;        // 每格：当前凸起值 / 基础色
+let staticLayer=null;              // 静态雕刻层缓存
+const active = new Set();          // 需要动态重绘的格子索引
+const R = 180;                     // 鼠标影响半径
+let mx=-1e4, my=-1e4, hasMouse=false;
+
+/* ---------- 布局 ---------- */
+function resize(){
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  // 网格密度：至少 40 列 x 30 行
+  cell = Math.max(14, Math.min(W/44, H/34));
+  gap = Math.max(1.5, cell*0.09);
+  maxLift = cell*0.30;
+  cols = Math.ceil(W/cell);
+  rows = Math.ceil(H/cell);
+
+  const n = cols*rows;
+  lifts = new Float32Array(n);
+  bases = new Array(n);
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      // 基础色：深紫灰与深蓝灰按位置正弦混合，制造雕刻层次
+      const t = 0.5 + 0.5*Math.sin(c*0.55 + r*0.42) * Math.cos(r*0.31 - c*0.18);
+      bases[r*cols+c] = lerp3(C_BASE_B, C_BASE_A, t*0.85+0.075);
+    }
+  }
+  active.clear();
+  buildStatic();
+}
+
+/* ---------- 静态层：无凸起的雕刻底板 ---------- */
+function buildStatic(){
+  staticLayer = document.createElement('canvas');
+  staticLayer.width = W*dpr; staticLayer.height = H*dpr;
+  const s = staticLayer.getContext('2d');
+  s.setTransform(dpr,0,0,dpr,0,0);
+  for(let r=0;r<rows;r++){
+    for(let c=0;c<cols;c++){
+      drawBaseCell(s, c, r);
+    }
+  }
+}
+function drawBaseCell(g, c, r){
+  const x=c*cell, y=r*cell, s=cell-2*gap;
+  g.fillStyle = rgba(bases[r*cols+c]);
+  g.fillRect(x+gap, y+gap, s, s);
+  // 顶部受光棱线 + 底部落影棱线 → 立体雕刻感
+  g.fillStyle = 'rgba(167,139,250,.12)';
+  g.fillRect(x+gap, y+gap, s, 1);
+  g.fillRect(x+gap, y+gap, 1, s);
+  g.fillStyle = 'rgba(10,8,24,.6)';
+  g.fillRect(x+gap, y+gap+s-1, s, 1);
+  g.fillRect(x+gap+s-1, y+gap, 1, s);
+}
+
+/* ---------- 动态格子：凸起 + 侧壁 + 发光顶面 ---------- */
+function drawLiftCell(c, r, l){
+  const x=c*cell, y=r*cell, s=cell-2*gap;
+  const h = l*maxLift;
+
+  // 凹陷底座（深紫黑）
+  ctx.fillStyle = C_SHADOW;
+  ctx.fillRect(x+gap, y+gap, s, s);
+
+  // 侧壁厚度（下壁 + 右壁）
+  ctx.fillStyle = 'rgba(16,12,34,.95)';
+  ctx.fillRect(x+gap, y+gap+s-h*0.5, s, h*0.5);
+  ctx.fillRect(x+gap+s-h*0.35, y+gap-h*0.15, h*0.35, s);
+
+  // 顶面：基础色 → 紫/青渐变过渡
+  const base = bases[r*cols+c];
+  // 按格子相对屏幕位置在亮紫与亮青之间取色，形成霓虹流动感
+  const mix = 0.5 + 0.5*Math.sin(c*0.5 + r*0.5);
+  const neon = lerp3(C_VIOLET, C_CYAN, mix);
+  const top = lerp3(base, neon, l);
+  ctx.fillStyle = rgba(top);
+  ctx.fillRect(x+gap, y+gap-h, s, s);
+
+  // 顶面棱线高光
+  ctx.fillStyle = `rgba(255,255,255,${(0.35*l).toFixed(3)})`;
+  ctx.fillRect(x+gap, y+gap-h, s, 1);
+  ctx.fillRect(x+gap, y+gap-h, 1, s);
+
+  // 边缘发光
+  if(l > 0.06){
+    ctx.save();
+    ctx.shadowColor = rgba(neon, 0.9*l);
+    ctx.shadowBlur = 20*l;
+    ctx.strokeStyle = rgba(neon, 0.55*l);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x+gap+0.5, y+gap-h+0.5, s-1, s-1);
+    ctx.restore();
+  }
+}
+
+/* ---------- 主循环 ---------- */
+function frame(){
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(staticLayer, 0, 0, W, H);
+
+  const newActive = new Set();
+  if(hasMouse){
+    const cr = Math.max(0, Math.floor((mx-R)/cell)), cr2 = Math.min(cols-1, Math.ceil((mx+R)/cell));
+    const rr = Math.max(0, Math.floor((my-R)/cell)), rr2 = Math.min(rows-1, Math.ceil((my+R)/cell));
+    for(let r=rr;r<=rr2;r++){
+      for(let c=cr;c<=cr2;c++){
+        const dx=(c+0.5)*cell-mx, dy=(r+0.5)*cell-my;
+        const d = Math.hypot(dx,dy);
+        if(d < R){
+          const i = r*cols+c;
+          const target = Math.pow(1-d/R, 1.6);
+          lifts[i] += (target - lifts[i]) * 0.22;   // 快速凸起
+          newActive.add(i);
+        }
+      }
+    }
+  }
+  // 旧激活格：不在半径内的缓动回落
+  active.forEach(i => {
+    if(!newActive.has(i)){
+      lifts[i] *= 0.88;                              // 缓慢恢复
+      if(lifts[i] < 0.012){
+        lifts[i] = 0;
+        const c = i%cols, r = (i/cols)|0;
+        ctx.clearRect(c*cell, r*cell, cell, cell);
+        ctx.drawImage(staticLayer, c*cell, r*cell, cell, cell, c*cell, r*cell, cell, cell);
+        return;
+      }
+      newActive.add(i);
+    }
+  });
+
+  // 重绘所有激活格
+  newActive.forEach(i => {
+    const c = i%cols, r = (i/cols)|0;
+    ctx.clearRect(c*cell, r*cell, cell, cell);
+    drawLiftCell(c, r, lifts[i]);
+  });
+
+  active.clear();
+  newActive.forEach(i => active.add(i));
+  requestAnimationFrame(frame);
+}
+
+/* ---------- 输入 ---------- */
+const setPos = (x,y) => { mx=x; my=y; hasMouse=true; };
+window.addEventListener('mousemove', e => setPos(e.clientX, e.clientY), {passive:true});
+window.addEventListener('touchmove', e => { const t=e.touches[0]; if(t) setPos(t.clientX, t.clientY); }, {passive:true});
+window.addEventListener('touchstart', e => { const t=e.touches[0]; if(t) setPos(t.clientX, t.clientY); }, {passive:true});
+window.addEventListener('mouseleave', () => { hasMouse=false; });
+window.addEventListener('touchend', () => { hasMouse=false; });
+window.addEventListener('resize', resize);
+
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
